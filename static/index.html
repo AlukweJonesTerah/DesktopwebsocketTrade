@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Market Data WebSocket Client</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        #messages { margin-top: 20px; }
+        .message { padding: 5px; border-bottom: 1px solid #ccc; }
+        .error { color: red; }
+        .initial { color: green; }
+        .update { color: blue; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ccc; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        #status { margin-top: 20px; }
+        .positive-change { color: green; }
+        .negative-change { color: red; }
+        .no-change { color: black; }
+    </style>
+</head>
+<body>
+    <h1>Market Data WebSocket Client</h1>
+    <div>
+        <label for="symbols">Enter symbols (comma-separated): </label>
+        <input type="text" id="symbols" placeholder="e.g., BTC, ETH" />
+        <button id="connectBtn">Connect</button>
+        <span id="status"></span>
+    </div>
+
+    <h2>Top 20 Symbols by Percentage Change</h2>
+    <table id="topChangesTable" style="display: none;">
+        <thead>
+            <tr>
+                <th>Rank</th>
+                <th>Symbol</th>
+                <th>Price</th>
+                <th>Change (%)</th>
+                <th>Timestamp</th>
+            </tr>
+        </thead>
+        <tbody id="topChangesBody">
+            <!-- Top changes will be added here -->
+        </tbody>
+    </table>
+
+    <script>
+        let websocket;
+        const symbolData = {}; // To store data for all symbols
+        const previousPrices = {}; // To store previous prices
+        const maxTopSymbols = 20; // Maximum number of top symbols to display
+
+        document.getElementById('connectBtn').addEventListener('click', () => {
+            const symbolsInput = document.getElementById('symbols').value;
+            const symbols = symbolsInput.split(',').map(s => s.trim().toUpperCase()).join(',');
+
+            if (websocket) {
+                websocket.close();
+            }
+
+            // Replace 'ws://localhost:8000' with your actual backend URL
+            const wsUrl = `ws://localhost:8000/ws/market/${symbols}`;
+            websocket = new WebSocket(wsUrl);
+
+            websocket.onopen = function(event) {
+                console.log('WebSocket is open now.');
+                updateStatus('Connected to WebSocket.', 'green');
+                document.getElementById('topChangesTable').style.display = 'table';
+            };
+
+            websocket.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                console.log('Received data:', data);
+
+                if (data.type === 'initial') {
+                    // Handle initial prices
+                    for (const [symbol, price] of Object.entries(data.data)) {
+                        const priceData = {
+                            price: price,
+                            timestamp: Date.now() // Use current time as timestamp
+                        };
+                        updateSymbolData(symbol, priceData);
+                    }
+                } else if (data.type === 'update') {
+                    // Handle price updates
+                    const priceData = {
+                        price: data.price,
+                        timestamp: data.timestamp
+                    };
+                    updateSymbolData(data.symbol, priceData);
+                } else if (data.type === 'acknowledgment') {
+                    console.log(`Acknowledgment: ${data.message}`);
+                } else if (data.type === 'error') {
+                    updateStatus(`Error: ${data.message}`, 'red');
+                }
+            };
+
+            websocket.onclose = function(event) {
+                console.log('WebSocket is closed now.');
+                if (event.code === 1008) { // Policy Violation (e.g., invalid symbols)
+                    updateStatus(`Connection closed: ${event.reason}`, 'red');
+                } else {
+                    updateStatus('WebSocket connection closed.', 'gray');
+                }
+                document.getElementById('topChangesTable').style.display = 'none';
+                clearSymbolData();
+            };
+
+            websocket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                updateStatus('WebSocket error occurred.', 'red');
+            };
+        });
+
+        function updateSymbolData(symbol, priceData) {
+            const currentPrice = parseFloat(priceData.price);
+            let percentageChange = 0;
+            let changeClass = 'no-change';
+
+            if (previousPrices[symbol] !== undefined) {
+                const previousPrice = previousPrices[symbol];
+                if (previousPrice !== 0) {
+                    percentageChange = ((currentPrice - previousPrice) / previousPrice) * 100;
+                    percentageChange = parseFloat(percentageChange.toFixed(2));
+                }
+                if (percentageChange > 0) {
+                    changeClass = 'positive-change';
+                } else if (percentageChange < 0) {
+                    changeClass = 'negative-change';
+                }
+            }
+
+            // Update symbol data
+            symbolData[symbol] = {
+                symbol: symbol,
+                price: currentPrice.toFixed(2),
+                percentageChange: percentageChange,
+                changeClass: changeClass,
+                timestamp: priceData.timestamp
+            };
+
+            // Store current price for next calculation
+            previousPrices[symbol] = currentPrice;
+
+            // Update the top changes table
+            updateTopChangesTable();
+        }
+
+        function updateTopChangesTable() {
+            // Convert symbolData to an array and sort by absolute percentage change
+            const sortedSymbols = Object.values(symbolData).sort((a, b) => {
+                return Math.abs(b.percentageChange) - Math.abs(a.percentageChange);
+            });
+
+            // Take the top N symbols
+            const topSymbols = sortedSymbols.slice(0, maxTopSymbols);
+
+            // Get reference to the table body
+            const tbody = document.getElementById('topChangesBody');
+            // Clear existing rows
+            tbody.innerHTML = '';
+
+            // Use a loop to create table rows for top symbols
+            for (let i = 0; i < topSymbols.length; i++) {
+                const data = topSymbols[i];
+                const row = document.createElement('tr');
+
+                const rankCell = document.createElement('td');
+                rankCell.textContent = i + 1;
+
+                const symbolCell = document.createElement('td');
+                symbolCell.textContent = data.symbol;
+
+                const priceCell = document.createElement('td');
+                priceCell.textContent = data.price;
+
+                const changeCell = document.createElement('td');
+                changeCell.textContent = data.percentageChange !== 0 ? `${data.percentageChange}%` : '0.00%';
+                changeCell.className = data.changeClass;
+
+                const timestampCell = document.createElement('td');
+                timestampCell.textContent = new Date(data.timestamp).toLocaleTimeString();
+
+                // Append cells to the row
+                row.appendChild(rankCell);
+                row.appendChild(symbolCell);
+                row.appendChild(priceCell);
+                row.appendChild(changeCell);
+                row.appendChild(timestampCell);
+
+                // Append row to the table body
+                tbody.appendChild(row);
+            }
+        }
+
+        function updateStatus(message, color = 'black') {
+            const statusSpan = document.getElementById('status');
+            statusSpan.textContent = message;
+            statusSpan.style.color = color;
+        }
+
+        function clearSymbolData() {
+            // Clear stored symbol data and previous prices
+            for (const symbol in symbolData) {
+                delete symbolData[symbol];
+            }
+            for (const symbol in previousPrices) {
+                delete previousPrices[symbol];
+            }
+            // Clear table body
+            const tbody = document.getElementById('topChangesBody');
+            tbody.innerHTML = '';
+        }
+    </script>
+</body>
+</html>

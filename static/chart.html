@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Real-Time Price Graph</title>
+    <style>
+        body { font-family: Arial, sans-serif; }
+        #status { margin-top: 20px; }
+        #chartContainer { width: 80%; margin: 0 auto; }
+    </style>
+    <!-- Include Chart.js Library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Include Date Adapter for date-fns -->
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+</head>
+<body>
+    <h1>Real-Time Price Graph</h1>
+    <div>
+        <label for="symbolSelect">Select a symbol: </label>
+        <select id="symbolSelect">
+            <!-- Symbols will be populated here -->
+        </select>
+        <span id="status"></span>
+    </div>
+    <div id="chartContainer">
+        <canvas id="priceChart"></canvas>
+    </div>
+
+    <script>
+        const symbols = [
+            "BTC", "ETH", "LTC", "BNB", "XRP", "KES", "UGX", "JPY",
+            "EUR/USD", "USD/GBP", "USD/JPY", "USD/CHF", "USD/KES"
+        ];
+
+        const symbolSelect = document.getElementById('symbolSelect');
+        let websocket;
+        let chart;
+        let symbol;
+
+        // Populate the dropdown
+        symbols.forEach(sym => {
+            const option = document.createElement('option');
+            option.value = sym;
+            option.textContent = sym;
+            symbolSelect.appendChild(option);
+        });
+
+        symbolSelect.addEventListener('change', () => {
+            symbol = symbolSelect.value;
+            if (symbol) {
+                // Close existing WebSocket if any
+                if (websocket) {
+                    websocket.close();
+                }
+                // Connect to WebSocket
+                connectWebSocket(symbol);
+            }
+        });
+
+        function initializeChart(symbol) {
+            const ctx = document.getElementById('priceChart').getContext('2d');
+
+            if (chart) {
+                chart.destroy();
+            }
+
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    datasets: [{
+                        label: `${symbol} Price`,
+                        data: [], // Data will be in { x: time, y: price } format
+                        borderColor: 'blue',
+                        backgroundColor: 'rgba(0, 0, 255, 0.1)',
+                        fill: true,
+                        tension: 0.1,
+                    }]
+                },
+                options: {
+                    scales: {
+                        x: {
+                            type: 'time',
+                            time: {
+                                unit: 'minute',
+                                displayFormats: {
+                                    minute: 'HH:mm'
+                                }
+                            },
+                            title: {
+                                display: true,
+                                text: 'Time'
+                            },
+                            bounds: 'data',
+                            ticks: {
+                                source: 'data',
+                                autoSkip: true
+                            },
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Price'
+                            }
+                        }
+                    },
+                    plugins: {
+                        legend: {
+                            display: true
+                        }
+                    }
+                }
+            });
+        }
+
+        function connectWebSocket(symbol) {
+            // Replace 'ws://localhost:8000' with your actual backend URL
+            const wsUrl = `ws://localhost:8000/ws/market/${symbol}`;
+            websocket = new WebSocket(wsUrl);
+
+            websocket.onopen = function(event) {
+                console.log('WebSocket is open now.');
+                updateStatus(`Connected to WebSocket for ${symbol}.`, 'green');
+            };
+
+            websocket.onmessage = function(event) {
+                const data = JSON.parse(event.data);
+                console.log('Received data:', data);
+
+                if (data.type === 'initial') {
+                    // Handle initial price
+                    const priceData = data.data[symbol];
+                    if (priceData) {
+                        initializeChart(symbol);
+                        addDataToChart(priceData);
+                    }
+                } else if (data.type === 'update' && data.symbol === symbol) {
+                    // Handle price update
+                    const priceData = {
+                        price: data.price,
+                        timestamp: data.timestamp
+                    };
+                    if (!chart) {
+                        initializeChart(symbol);
+                    }
+                    addDataToChart(priceData);
+                } else if (data.type === 'error') {
+                    updateStatus(`Error: ${data.message}`, 'red');
+                }
+            };
+
+            websocket.onclose = function(event) {
+                console.log('WebSocket is closed now.');
+                updateStatus('WebSocket connection closed.', 'gray');
+            };
+
+            websocket.onerror = function(error) {
+                console.error('WebSocket error:', error);
+                updateStatus('WebSocket error occurred.', 'red');
+            };
+        }
+
+        function addDataToChart(priceData) {
+            const time = new Date(priceData.timestamp);
+
+            // Validate timestamp
+            const now = Date.now();
+            if (time.getTime() > now + 60000) { // Allowing a 1-minute buffer
+                console.error('Received a timestamp in the future:', time);
+                return;
+            }
+
+            // Add new data point
+            chart.data.datasets[0].data.push({ x: time, y: priceData.price });
+
+            // Keep the last 50 data points
+            if (chart.data.datasets[0].data.length > 50) {
+                chart.data.datasets[0].data.shift();
+            }
+
+            chart.update();
+        }
+
+        function updateStatus(message, color = 'black') {
+            const statusSpan = document.getElementById('status');
+            statusSpan.textContent = message;
+            statusSpan.style.color = color;
+        }
+    </script>
+</body>
+</html>
