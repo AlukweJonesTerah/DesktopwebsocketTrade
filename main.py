@@ -35,27 +35,57 @@ BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
 KRAKEN_WS_URL = "wss://ws.kraken.com"
 
 # Mapping of symbols to internal representation
-# Mapping of symbols to internal representation
 WEBSOCKET_CURRENCY_PAIRS = {
+    # Binance pairs
     "btcusdt": "BTC",
     "ethusdt": "ETH",
     "ltcusdt": "LTC",
     "bnbusdt": "BNB",
     "xrpusdt": "XRP",
+    "adausdt": "ADA",
+    "dogeusdt": "DOGE",
+    "solusdt": "SOL",
+    "dotusdt": "DOT",
+    "linkusdt": "LINK",
+    "uniusdt": "UNI",
     "oaxusdt": "OAX",
     "arbusdt": "ARB",
     "usdtron": "USDTRON",
+
+    # Kraken pairs
     "XBT/USD": "BTC",
     "ETH/USD": "ETH",
+    "LTC/USD": "LTC",
+    "XRP/USD": "XRP",
+    "ADA/USD": "ADA",
+    "DOGE/USD": "DOGE",
+    "SOL/USD": "SOL",
+    "DOT/USD": "DOT",
+    "LINK/USD": "LINK",
+    "UNI/USD": "UNI",
+
+    # Forex pairs
+    "EUR/USD": "EUR/USD",
+    "GBP/USD": "GBP/USD",
+    "USD/JPY": "USD/JPY",
+    "USD/CHF": "USD/CHF",
+    "AUD/USD": "AUD/USD",
+    "USD/CAD": "USD/CAD",
+    "EUR/GBP": "EUR/GBP",
+    "EUR/JPY": "EUR/JPY",
+
+    # Additional currencies
     "USD/KSH": "KES",
     "USD/UGX": "UGX",
-    "EUR/USD": "EUR/USD",
-    "USD/JPY": "USD/JPY",
+
+    # Alternative spellings
     "eurusd": "EUR/USD",
-    "usdgbp": "USD/GBP",
     "usdjpy": "USD/JPY",
     "usdchf": "USD/CHF",
-    "usdksh": "USD/KES"
+    "gbpusd": "GBP/USD",
+    "audusd": "AUD/USD",
+    "usdcad": "USD/CAD",
+    "usdksh": "USD/KES",
 }
 
 # FastAPI app initialization
@@ -256,30 +286,35 @@ async def websocket_market_data(websocket: WebSocket, symbols: str):
 
 # Helper functions for WebSocket subscription messages
 def get_kraken_subscription_message():
+    pairs = [
+        "XBT/USD", "ETH/USD", "LTC/USD", "XRP/USD", "ADA/USD",
+        "DOGE/USD", "SOL/USD", "DOT/USD", "LINK/USD", "UNI/USD",
+        "EUR/USD", "GBP/USD", "USD/JPY", "USD/CHF", "AUD/USD",
+        "USD/CAD", "EUR/GBP", "EUR/JPY", "USD/KES", "USD/UGX"
+    ]
     return json.dumps({
         "event": "subscribe",
-        "pair": ["XBT/USD", "ETH/USD", "BTC/USD", "USD/KES", "USD/JPY", "EUR/USD", "USD/UGX"],
+        "pair": pairs,
         "subscription": {
             "name": "ticker"
         }
     })
 
 
+
 def get_binance_subscription_message():
+    symbols = [
+        "btcusdt", "ethusdt", "ltcusdt", "bnbusdt", "xrpusdt",
+        "adausdt", "dogeusdt", "solusdt", "dotusdt", "linkusdt",
+        "uniusdt", "oaxusdt", "arbusdt", "usdtron@trade"
+    ]
+    params = [f"{symbol}@trade" for symbol in symbols]
     return json.dumps({
         "method": "SUBSCRIBE",
-        "params": [
-            "btcusdt@trade",
-            "ethusdt@trade",
-            "ltcusdt@trade",
-            "bnbusdt@trade",
-            "xrpusdt@trade",
-            "oaxusdt@trade",
-            "arbusdt@trade",
-            "usdtron@trade",
-        ],
+        "params": params,
         "id": 1
     })
+
 
 async def send_pings(websocket, interval=10):
     while True:
