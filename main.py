@@ -2,7 +2,9 @@ import asyncio
 import json
 import logging
 import time
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Set
+
+from bson import timestamp
 from fastapi.middleware.cors import CORSMiddleware
 import websockets
 from beanie import init_beanie
@@ -21,6 +23,10 @@ from model import MongoTradingPair
 client = AsyncIOMotorClient(MONGODB_URI)
 db = client[TEST_DB_NAME]
 
+# Initialize logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 connect_to_mongodb()
 # Import your MongoTradingPair model for DB operations
 
@@ -29,18 +35,22 @@ BINANCE_WS_URL = "wss://stream.binance.com:9443/ws"
 KRAKEN_WS_URL = "wss://ws.kraken.com"
 
 # Mapping of symbols to internal representation
+# Mapping of symbols to internal representation
 WEBSOCKET_CURRENCY_PAIRS = {
     "btcusdt": "BTC",
     "ethusdt": "ETH",
     "ltcusdt": "LTC",
     "bnbusdt": "BNB",
     "xrpusdt": "XRP",
+    "oaxusdt": "OAX",
+    "arbusdt": "ARB",
+    "usdtron": "USDTRON",
     "XBT/USD": "BTC",
     "ETH/USD": "ETH",
     "USD/KSH": "KES",
     "USD/UGX": "UGX",
-    "EUR/USD": "USD",
-    "USD/JPY": "JPY",
+    "EUR/USD": "EUR/USD",
+    "USD/JPY": "USD/JPY",
     "eurusd": "EUR/USD",
     "usdgbp": "USD/GBP",
     "usdjpy": "USD/JPY",
@@ -76,66 +86,56 @@ price_cache = TTLCache(maxsize=10000, ttl=30)
 last_update_times = TTLCache(maxsize=10000, ttl=2)  # Store last update times with a short TTL of 2 seconds
 latest_prices = {}
 latest_prices_lock = asyncio.Lock()
+latest_data_lock = asyncio.Lock()
+latest_timestamps = {}
+latest_ranks = {}
 
 
 # WebSocket connection manager
 class ConnectionManager:
     def __init__(self):
-        self.active_connections: Dict[str, List[WebSocket]] = {}
-        self.connection_symbols: Dict[WebSocket, set] = {}
+        self.active_connections: Dict[str, Set[WebSocket]] = {}  # symbol -> set of WebSockets
+        self.all_assets_connections: Set[WebSocket] = set()  # WebSockets subscribed to all assets
+        self.connection_symbols: Dict[WebSocket, Set[str]] = {}  # WebSocket -> set of symbols
 
     async def connect(self, websocket: WebSocket, symbols: Optional[List[str]] = None):
         await websocket.accept()
-        if symbols is None:
-            symbols = list(WEBSOCKET_CURRENCY_PAIRS.values())
-
-        # Store which symbols this connection is interested in
-        self.connection_symbols[websocket] = set(symbols)
-
-        # Add the connection to each symbol's list
-        for symbol in symbols:
-            if symbol not in self.active_connections:
-                self.active_connections[symbol] = []
-            self.active_connections[symbol].append(websocket)
+        if symbols is None or "ALL" in symbols:
+            self.all_assets_connections.add(websocket)
+            self.connection_symbols[websocket] = set(latest_prices.keys())
+        else:
+            self.connection_symbols[websocket] = set(symbols)
+            for symbol in symbols:
+                if symbol not in self.active_connections:
+                    self.active_connections[symbol] = set()
+                self.active_connections[symbol].add(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        # Remove from symbol-specific connections
         symbols = self.connection_symbols.get(websocket, set())
         for symbol in symbols:
             if symbol in self.active_connections:
-                if websocket in self.active_connections[symbol]:
-                    self.active_connections[symbol].remove(websocket)
-
-                # Clean up empty symbol lists
+                self.active_connections[symbol].discard(websocket)
                 if not self.active_connections[symbol]:
                     del self.active_connections[symbol]
-
-        # Remove from connection symbols mapping
-        if websocket in self.connection_symbols:
-            del self.connection_symbols[websocket]
+        self.all_assets_connections.discard(websocket)
+        self.connection_symbols.pop(websocket, None)
 
     async def broadcast_to_symbol(self, symbol: str, message: str):
-        if symbol in self.active_connections:
-            disconnected = []
-            for connection in self.active_connections[symbol]:
-                try:
-                    await connection.send_text(message)
-                except WebSocketDisconnect:
-                    disconnected.append(connection)
-                except Exception as e:
-                    logging.error(f"Error broadcasting to connection: {e}")
-                    disconnected.append(connection)
-
-            # Clean up any disconnected clients
-            for connection in disconnected:
-                self.disconnect(connection)
-
+        connections = self.active_connections.get(symbol, set()).union(self.all_assets_connections)
+        disconnected = []
+        for connection in connections:
+            try:
+                await connection.send_text(message)
+            except WebSocketDisconnect:
+                disconnected.append(connection)
+            except Exception as e:
+                logger.error(f"Error broadcasting to connection: {e}")
+                disconnected.append(connection)
+        for connection in disconnected:
+            self.disconnect(connection)
 
 # Initialize connection manager
 manager = ConnectionManager()
-
-logger = logging.getLogger(__name__)
-
 
 # WebSocket route to handle price updates
 
@@ -176,58 +176,82 @@ async def websocket_prices(websocket: WebSocket):
 @app.websocket("/ws/market/{symbols}")
 async def websocket_market_data(websocket: WebSocket, symbols: str):
     try:
-        # Parse the symbols from the URL
-        requested_symbols = [s.strip().upper() for s in symbols.split(',')]
-
-        # Validate symbols
-        valid_symbols = set(WEBSOCKET_CURRENCY_PAIRS.values())
-        invalid_symbols = [s for s in requested_symbols if s not in valid_symbols]
-        if invalid_symbols:
-            await websocket.close(code=1008, reason=f"Invalid symbols: {','.join(invalid_symbols)}")
+        # Parse symbols and handle potential parsing errors
+        try:
+            requested_symbols = [s.strip().upper() for s in symbols.split(',')]
+            subscribe_all = "ALL" in requested_symbols
+        except Exception as e:
+            logger.error(f"Error parsing symbols: {e}")
+            await websocket.close(code=1008, reason="Invalid symbol format.")
             return
 
-        # Connect the WebSocket with specified symbols
-        await manager.connect(websocket, requested_symbols)
+        # Connect to WebSocket manager, catching any potential connection errors
+        try:
+            await manager.connect(websocket, requested_symbols if not subscribe_all else None)
+        except Exception as e:
+            logger.error(f"Connection error during WebSocket setup: {e}")
+            await websocket.close(code=1011, reason="Connection setup failed.")
+            return
 
-        # Send initial prices for requested symbols
+        # Prepare initial data to send to client
         initial_prices = {}
-        async with latest_prices_lock:
-            for symbol in requested_symbols:
-                if symbol in latest_prices:
-                    initial_prices[symbol] = latest_prices[symbol]
+        initial_ranks = {}
+        initial_timestamps = {}
 
-        if initial_prices:
+        try:
+            async with latest_data_lock:
+                if subscribe_all:
+                    initial_prices = latest_prices.copy()
+                    initial_ranks = latest_ranks.copy()
+                    initial_timestamps = latest_timestamps.copy()
+                else:
+                    for symbol in requested_symbols:
+                        if symbol in latest_prices:
+                            initial_prices[symbol] = latest_prices[symbol]
+                            initial_ranks[symbol] = latest_ranks.get(symbol, None)
+                            initial_timestamps[symbol] = latest_timestamps.get(symbol, None)
+        except Exception as e:
+            logger.error(f"Error retrieving initial data: {e}")
+            await websocket.close(code=1011, reason="Error retrieving initial data.")
+            return
+
+        # Send initial data and handle potential transmission errors
+        try:
             await websocket.send_text(json.dumps({
                 "type": "initial",
-                "data": initial_prices
+                "data": initial_prices,
+                "ranks": initial_ranks,
+                "timestamps": initial_timestamps
             }))
+        except Exception as e:
+            logger.error(f"Error sending initial data to WebSocket client: {e}")
+            await websocket.close(code=1011, reason="Error sending initial data.")
+            return
 
-        # Keep the connection alive and handle incoming messages
+        # Listen for client messages
         while True:
             try:
                 data = await websocket.receive_text()
-                # Handle any client messages here if needed
-                try:
-                    message = json.loads(data)
-                    # You can add custom message handling here
-                    await websocket.send_text(json.dumps({
-                        "type": "acknowledgment",
-                        "message": "Message received"
-                    }))
-                except json.JSONDecodeError:
-                    await websocket.send_text(json.dumps({
-                        "type": "error",
-                        "message": "Invalid JSON format"
-                    }))
+                logger.info(f"Received message from client: {data}")
+                # Optional: Handle messages from client if needed
             except WebSocketDisconnect:
+                logger.info("Client disconnected.")
                 manager.disconnect(websocket)
                 break
+            except json.JSONDecodeError as e:
+                logger.error(f"Invalid JSON format received: {e}")
+                await websocket.send_text(json.dumps({
+                    "type": "error",
+                    "message": "Invalid JSON format."
+                }))
+            except Exception as e:
+                logger.error(f"Unexpected error receiving message from client: {e}")
+                await websocket.close(code=1011, reason="Unexpected error in message handling.")
+                break
     except Exception as e:
-        logging.error(f"WebSocket error: {e}")
+        logger.error(f"Unhandled WebSocket error: {e}")
         if not websocket.client_state.disconnected:
-            await websocket.close(code=1011, reason="Internal server error")
-        raise
-
+            await websocket.close(code=1011, reason="Internal server error.")
 
 
 # Helper functions for WebSocket subscription messages
@@ -249,17 +273,20 @@ def get_binance_subscription_message():
             "ethusdt@trade",
             "ltcusdt@trade",
             "bnbusdt@trade",
-            "xrpusdt@trade"
+            "xrpusdt@trade",
+            "oaxusdt@trade",
+            "arbusdt@trade",
+            "usdtron@trade",
         ],
         "id": 1
     })
 
-async def send_pings(websocket, interval=30):
+async def send_pings(websocket, interval=10):
     while True:
         await asyncio.sleep(interval)
         try:
             pong_waiter = await websocket.ping()
-            await asyncio.wait_for(pong_waiter, timeout=30)  # Wait for the pong message with a timeout
+            await asyncio.wait_for(pong_waiter, timeout=10)  # Wait for the pong message with a timeout
             logger.info("Ping successful!")
         except asyncio.TimeoutError:
             logger.error("Ping timed out. Connection might be unstable.")
@@ -277,6 +304,10 @@ async def should_update(symbol: str, interval: int = 2):
         return True
     return False
 
+def calculate_ranks():
+    price_list = sorted(latest_prices.items(), key=lambda x: x[1], reverse=True)
+    rank_dict = {symbol: rank + 1 for rank, (symbol, _) in enumerate(price_list)}
+    return rank_dict
 
 # Function to handle incoming messages from WebSockets (Binance & Kraken)
 async def handle_message(message):
@@ -290,11 +321,14 @@ async def handle_message(message):
         if isinstance(data, dict) and data.get("e") == "trade":
             symbol = data["s"].lower()
             price = float(data["p"])
+            timestamp = int(float(data['T']) / 1000)  # Unix timestamp in seconds
             if symbol in WEBSOCKET_CURRENCY_PAIRS:
                 mapped_symbol = WEBSOCKET_CURRENCY_PAIRS[symbol]
                 if await should_update(mapped_symbol):
                     async with latest_prices_lock:
                         latest_prices[mapped_symbol] = price
+                        latest_timestamps[mapped_symbol] = timestamp
+                        latest_ranks.update(calculate_ranks())
 
                     # Broadcast price update to WebSocket clients
                     # update_message = json.dumps({mapped_symbol: price})
@@ -305,8 +339,11 @@ async def handle_message(message):
                         "type": "update",
                         "symbol": mapped_symbol,
                         "price": price,
-                        "timestamp": int(time.time() * 1000)
+                        "rank": latest_ranks[mapped_symbol],
+                        "timestamp": timestamp
                     })
+
+                    # Broadcast the update
                     await manager.broadcast_to_symbol(mapped_symbol, update_message)
                     await update_or_create_trading_pair(mapped_symbol, price)
 
@@ -315,19 +352,25 @@ async def handle_message(message):
             pair = data[3]
             price = float(data[1]['c'][0])
             mapped_symbol = WEBSOCKET_CURRENCY_PAIRS.get(pair)
+            timestamp = int(time.time() * 1000)  # Use current time in milliseconds
             if mapped_symbol:
                 if await should_update(mapped_symbol):
                     async with latest_prices_lock:
                         latest_prices[mapped_symbol] = price
+                        latest_timestamps[mapped_symbol] = timestamp
+                        latest_ranks.update(calculate_ranks())
 
                     # Broadcast price update to WebSocket clients
                     # update_message = json.dumps({mapped_symbol: price})
                     # await manager.broadcast(update_message)
+
+                    # Prepare the update message
                     update_message = json.dumps({
                         "type": "update",
                         "symbol": mapped_symbol,
                         "price": price,
-                        "timestamp": int(time.time() * 1000)
+                        "rank": latest_ranks[mapped_symbol],
+                        "timestamp": timestamp
                     })
 
                     await manager.broadcast_to_symbol(mapped_symbol, update_message)
@@ -351,10 +394,11 @@ async def update_or_create_trading_pair(symbol: str, price: float):
         if mongo_trading_pair:
             logger.info(f"Found existing trading pair: {symbol}, updating price to {price}")
             mongo_trading_pair.price = price
+            mongo_trading_pair.timestamp = timestamp
             await mongo_trading_pair.save()
         else:
             logger.info(f"Creating new trading pair: {symbol} with price {price}")
-            mongo_trading_pair = MongoTradingPair(symbol=symbol, price=price)
+            mongo_trading_pair = MongoTradingPair(symbol=symbol, price=price, timestamp=timestamp)
             await mongo_trading_pair.insert()
         logger.info(f"Updated/created trading pair {symbol} with price {price}.")
 
@@ -375,13 +419,13 @@ async def kraken_websocket_listener():
 # Reconnect to WebSocket with exponential backoff
 async def reconnect_with_backoff(url, subscription_message):
     delay = 2
-    max_delay = 60
+    max_delay = 15
     while True:
         try:
-            websocket = await websockets.connect(url, ping_interval=500, ping_timeout=30)
+            websocket = await websockets.connect(url, ping_interval=150, ping_timeout=10)
             logger.info(f"Connected to WebSocket at {url}.")
             await websocket.send(subscription_message)
-            asyncio.create_task(send_pings(websocket, interval=120))
+            asyncio.create_task(send_pings(websocket, interval=15))
             while True:
                 message = await websocket.recv()
                 await handle_message(message)

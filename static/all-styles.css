@@ -1,0 +1,18 @@
+body {
+    font-family: Arial, sans-serif;
+    margin: 20px;
+}
+
+h1 {
+    text-align: center;
+}
+
+#assetSymbol, button {
+    margin: 10px;
+}
+
+canvas {
+    width: 100% !important;
+    max-width: 800px;
+    height: 500px !important;
+}

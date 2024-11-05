@@ -1,0 +1,55 @@
+body {
+    font-family: Arial, sans-serif;
+    background-color: #f5f5f5;
+    margin: 20px;
+}
+
+h1 {
+    text-align: center;
+}
+
+#asset-table {
+    width: 80%;
+    margin: 0 auto;
+    border-collapse: collapse;
+}
+
+#asset-table th, #asset-table td {
+    padding: 12px;
+    border: 1px solid #ddd;
+    text-align: center;
+}
+
+#asset-table th {
+    background-color: #4CAF50;
+    color: white;
+}
+
+#asset-table tr:nth-child(even) {
+    background-color: #f2f2f2;
+}
+
+#asset-table tr:hover {
+    background-color: #ddd;
+}
+
+#asset-table th, #asset-table td {
+    /* Existing styles */
+    padding: 12px;
+    border: 1px solid #ddd;
+    text-align: center;
+    white-space: nowrap; /* Prevent timestamp wrapping */
+}
+
+.timestamp {
+    font-size: 0.9em;
+    color: #555;
+}
+
+.positive-change {
+    color: green;
+}
+
+.negative-change {
+    color: red;
+}

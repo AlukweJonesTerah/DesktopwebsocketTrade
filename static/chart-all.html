@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Real-Time Asset Price Chart</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- Include Chart.js library -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chartjs-adapter-date-fns"></script>
+</head>
+<body>
+    <h1>Track Asset Price in Real-Time</h1>
+    <label for="assetSymbol">Enter Asset Symbol (e.g., BTC, ETH): </label>
+    <input type="text" id="assetSymbol" placeholder="Enter symbol here...">
+    <button onclick="connectToAsset()">Track Asset</button>
+    <canvas id="assetChart"></canvas>
+    <!-- Include your JavaScript file -->
+    <script src="chart.js"></script>
+</body>
+</html>
